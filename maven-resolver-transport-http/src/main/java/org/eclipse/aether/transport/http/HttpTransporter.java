@@ -25,6 +25,7 @@ import java.io.InterruptedIOException;
 import java.io.OutputStream;
 import java.net.URI;
 import java.net.URISyntaxException;
+import java.nio.charset.Charset;
 import java.util.Collections;
 import java.util.Date;
 import java.util.List;
@@ -39,11 +40,14 @@ import org.apache.http.HttpHeaders;
 import org.apache.http.HttpHost;
 import org.apache.http.HttpResponse;
 import org.apache.http.HttpStatus;
+import org.apache.http.auth.AuthSchemeProvider;
 import org.apache.http.auth.AuthScope;
-import org.apache.http.auth.params.AuthParams;
 import org.apache.http.client.CredentialsProvider;
 import org.apache.http.client.HttpClient;
 import org.apache.http.client.HttpResponseException;
+import org.apache.http.client.config.AuthSchemes;
+import org.apache.http.client.config.CookieSpecs;
+import org.apache.http.client.config.RequestConfig;
 import org.apache.http.client.methods.HttpGet;
 import org.apache.http.client.methods.HttpHead;
 import org.apache.http.client.methods.HttpOptions;
@@ -51,14 +55,12 @@ import org.apache.http.client.methods.HttpPut;
 import org.apache.http.client.methods.HttpUriRequest;
 import org.apache.http.client.utils.DateUtils;
 import org.apache.http.client.utils.URIUtils;
-import org.apache.http.conn.params.ConnRouteParams;
+import org.apache.http.config.Lookup;
+import org.apache.http.config.RegistryBuilder;
 import org.apache.http.entity.AbstractHttpEntity;
 import org.apache.http.entity.ByteArrayEntity;
-import org.apache.http.impl.client.DecompressingHttpClient;
-import org.apache.http.impl.client.DefaultHttpClient;
-import org.apache.http.params.HttpConnectionParams;
-import org.apache.http.params.HttpParams;
-import org.apache.http.params.HttpProtocolParams;
+import org.apache.http.impl.auth.*;
+import org.apache.http.impl.client.HttpClientBuilder;
 import org.apache.http.util.EntityUtils;
 import org.eclipse.aether.ConfigurationProperties;
 import org.eclipse.aether.RepositorySystemSession;
@@ -140,13 +142,13 @@ final class HttpTransporter
             ConfigUtils.getMap( session, Collections.emptyMap(), ConfigurationProperties.HTTP_HEADERS + "."
                 + repository.getId(), ConfigurationProperties.HTTP_HEADERS );
 
-        DefaultHttpClient client = new DefaultHttpClient( state.getConnectionManager() );
+        HttpClientBuilder clientBuilder = HttpClientBuilder.create();
+        clientBuilder.setConnectionManager(state.getConnectionManager());
+        configureClient(clientBuilder, session, repository.getId(), proxy);
+        clientBuilder.setDefaultCredentialsProvider(
+                toCredentialsProvider(server, repoAuthContext, proxy, proxyAuthContext));
 
-        configureClient( client.getParams(), session, repository, proxy );
-
-        client.setCredentialsProvider( toCredentialsProvider( server, repoAuthContext, proxy, proxyAuthContext ) );
-
-        this.client = new DecompressingHttpClient( client );
+        this.client = clientBuilder.build();
     }
 
     private static HttpHost toHost( Proxy proxy )
@@ -159,31 +161,46 @@ final class HttpTransporter
         return host;
     }
 
-    private static void configureClient( HttpParams params, RepositorySystemSession session,
-                                         RemoteRepository repository, HttpHost proxy )
+    private static void configureClient( HttpClientBuilder clientBuilder, RepositorySystemSession session,
+                                         String repositoryId, HttpHost proxy )
     {
-        AuthParams.setCredentialCharset( params,
-                                         ConfigUtils.getString( session,
-                                                                ConfigurationProperties.DEFAULT_HTTP_CREDENTIAL_ENCODING,
-                                                                ConfigurationProperties.HTTP_CREDENTIAL_ENCODING + "."
-                                                                    + repository.getId(),
-                                                                ConfigurationProperties.HTTP_CREDENTIAL_ENCODING ) );
-        ConnRouteParams.setDefaultProxy( params, proxy );
-        HttpConnectionParams.setConnectionTimeout( params,
-                                                   ConfigUtils.getInteger( session,
-                                                                           ConfigurationProperties.DEFAULT_CONNECT_TIMEOUT,
-                                                                           ConfigurationProperties.CONNECT_TIMEOUT
-                                                                               + "." + repository.getId(),
-                                                                           ConfigurationProperties.CONNECT_TIMEOUT ) );
-        HttpConnectionParams.setSoTimeout( params,
-                                           ConfigUtils.getInteger( session,
-                                                                   ConfigurationProperties.DEFAULT_REQUEST_TIMEOUT,
-                                                                   ConfigurationProperties.REQUEST_TIMEOUT + "."
-                                                                       + repository.getId(),
-                                                                   ConfigurationProperties.REQUEST_TIMEOUT ) );
-        HttpProtocolParams.setUserAgent( params, ConfigUtils.getString( session,
-                                                                        ConfigurationProperties.DEFAULT_USER_AGENT,
-                                                                        ConfigurationProperties.USER_AGENT ) );
+        // Set auth credential encodings
+        Charset charset = Charset.forName(ConfigUtils.getString(session,
+                ConfigurationProperties.DEFAULT_HTTP_CREDENTIAL_ENCODING,
+                ConfigurationProperties.HTTP_CREDENTIAL_ENCODING + "."
+                        + repositoryId,
+                ConfigurationProperties.HTTP_CREDENTIAL_ENCODING));
+        Lookup<AuthSchemeProvider> authSchemeRegistry = RegistryBuilder.<AuthSchemeProvider>create()
+                .register(AuthSchemes.BASIC, new BasicSchemeFactory(charset))
+                .register(AuthSchemes.DIGEST, new DigestSchemeFactory(charset))
+                .register(AuthSchemes.NTLM, new NTLMSchemeFactory())
+                .register(AuthSchemes.SPNEGO, new SPNegoSchemeFactory())
+                .register(AuthSchemes.KERBEROS, new KerberosSchemeFactory())
+                .build();
+        clientBuilder.setDefaultAuthSchemeRegistry(authSchemeRegistry);
+
+        // Set timeouts and cookie spec
+        RequestConfig.Builder requestConfigBuilder = RequestConfig.custom();
+        requestConfigBuilder.setConnectTimeout(ConfigUtils.getInteger(session,
+                ConfigurationProperties.DEFAULT_CONNECT_TIMEOUT,
+                ConfigurationProperties.CONNECT_TIMEOUT
+                        + "." + repositoryId,
+                ConfigurationProperties.CONNECT_TIMEOUT));
+        requestConfigBuilder.setSocketTimeout(ConfigUtils.getInteger(session,
+                ConfigurationProperties.DEFAULT_REQUEST_TIMEOUT,
+                ConfigurationProperties.REQUEST_TIMEOUT + "."
+                        + repositoryId,
+                ConfigurationProperties.REQUEST_TIMEOUT));
+        requestConfigBuilder.setCookieSpec(CookieSpecs.STANDARD);
+        clientBuilder.setDefaultRequestConfig(requestConfigBuilder.build());
+
+        // Set proxy
+        clientBuilder.setProxy(proxy);
+
+        // Set userAgent
+        clientBuilder.setUserAgent(ConfigUtils.getString(session,
+                ConfigurationProperties.DEFAULT_USER_AGENT,
+                ConfigurationProperties.USER_AGENT));
     }
 
     private static CredentialsProvider toCredentialsProvider( HttpHost server, AuthenticationContext serverAuthCtx,
