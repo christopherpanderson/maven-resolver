@@ -44,11 +44,13 @@ import org.apache.http.auth.params.AuthParams;
 import org.apache.http.client.CredentialsProvider;
 import org.apache.http.client.HttpClient;
 import org.apache.http.client.HttpResponseException;
+import org.apache.http.client.config.CookieSpecs;
 import org.apache.http.client.methods.HttpGet;
 import org.apache.http.client.methods.HttpHead;
 import org.apache.http.client.methods.HttpOptions;
 import org.apache.http.client.methods.HttpPut;
 import org.apache.http.client.methods.HttpUriRequest;
+import org.apache.http.client.params.HttpClientParams;
 import org.apache.http.client.utils.DateUtils;
 import org.apache.http.client.utils.URIUtils;
 import org.apache.http.conn.params.ConnRouteParams;
@@ -145,6 +147,8 @@ final class HttpTransporter
         configureClient( client.getParams(), session, repository, proxy );
 
         client.setCredentialsProvider( toCredentialsProvider( server, repoAuthContext, proxy, proxyAuthContext ) );
+
+        HttpClientParams.setCookiePolicy(client.getParams(), CookieSpecs.BROWSER_COMPATIBILITY);
 
         this.client = new DecompressingHttpClient( client );
     }
